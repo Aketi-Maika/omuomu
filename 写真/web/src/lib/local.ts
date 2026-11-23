@@ -11,8 +11,12 @@ export interface LocalConfig {
   googleClientId: string
   allowedDomain: string
   adminEmails: string[]
+  blockedEmails: string[]
+  sessionHours: number
+  publicApiUrl: string
+  allowedOrigins: string[]
   sheetUrl: string
-  viewKey: string
+  sheetToken: string
   title: string
   subtitle: string
   period: string
@@ -24,6 +28,7 @@ export interface LocalConfig {
   thumbSize: number
   jpegQuality: number
   outDir: string
+  storeDir: string
 }
 
 export interface BuildStatus {
@@ -71,7 +76,7 @@ export const local = {
   getConfig: () => call<LocalConfig>('/config'),
   saveConfig: (c: LocalConfig) =>
     call<{ ok: boolean; problems: string[]; warnings: string[] }>('/config', { method: 'PUT', body: JSON.stringify(c) }),
-  newKey: () => call<{ ok: boolean }>('/config/new-key', { method: 'POST' }),
+  mirror: () => call<{ ok: boolean; sent: number }>('/mirror', { method: 'POST' }),
   appsScriptSetup: () => call<{ code: string }>('/apps-script-setup'),
   checkPath: (p: string) =>
     call<{ exists: boolean; kind?: string; images?: number; path: string }>('/check-path?p=' + encodeURIComponent(p)),

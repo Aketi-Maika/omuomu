@@ -1,9 +1,9 @@
 // 画面間で共有する状態（ログイン・名簿・写真一覧・集計）
 import { reactive } from 'vue'
-import { b64ToBytes, fetchDecrypt } from './crypto'
+import { localStatus } from './local'
 import type { Manifest, PublicInfo, Stats, User } from './types'
 
-const SS_SESSION = 'omuomu.session.v2'
+const SS_SESSION = 'omuomu.session.v3'
 
 export const DATA = './data/'
 
@@ -25,10 +25,12 @@ function ssSet(k: string, v: string | null) {
 export const store = reactive({
   pub: null as PublicInfo | null,
   pubError: '' as string,
-  key: null as Uint8Array | null,
+  /** 公開 API（NAS）の場所。管理ツールの中で開いているときは同じ場所 */
+  apiBase: '' as string,
+  isLocalTool: false,
   manifest: null as Manifest | null,
   user: null as User | null,
-  /** この PC の管理ツールから、Google ログインなしで表示確認している */
+  /** 管理ツールから Google ログインなしで表示を確かめている */
   localPreview: false,
   stats: {} as Stats,
   statsLoaded: false,
@@ -39,58 +41,53 @@ export function isAdmin() {
   return store.user?.role === 'admin'
 }
 
-export async function loadPublic(force = false): Promise<PublicInfo | null> {
-  if (store.pub && !force) return store.pub
-  try {
-    const r = await fetch(DATA + 'public.json', { cache: 'no-cache' })
-    if (!r.ok) throw new Error(String(r.status))
-    store.pub = await r.json()
-    store.pubError = ''
-    document.title = store.pub!.title || '写真展'
-  } catch {
-    store.pub = null
-    store.pubError = 'まだ写真が公開されていません'
-  }
-  return store.pub
+let pubLoading: Promise<PublicInfo | null> | null = null
+export function loadPublic(force = false): Promise<PublicInfo | null> {
+  if (store.pub && !force) return Promise.resolve(store.pub)
+  if (pubLoading && !force) return pubLoading
+  pubLoading = (async () => {
+    const local = await localStatus()
+    store.isLocalTool = !!local
+    try {
+      const r = await fetch(DATA + 'public.json', { cache: 'no-cache' })
+      if (!r.ok) throw new Error(String(r.status))
+      store.pub = await r.json()
+      store.pubError = ''
+      document.title = store.pub!.title || '写真展'
+    } catch {
+      store.pub = null
+      store.pubError = 'まだ写真が公開されていません'
+    }
+    store.apiBase = local ? '.' : (store.pub?.apiBase ?? '').replace(/\/$/, '')
+    return store.pub
+  })()
+  return pubLoading
 }
 
-/** 写真の鍵で名簿・写真一覧を開く */
-export async function openWithKey(viewKeyB64: string): Promise<void> {
-  const key = b64ToBytes(viewKeyB64)
-  const bytes = await fetchDecrypt(key, DATA + 'manifest.enc')
-  store.manifest = JSON.parse(new TextDecoder().decode(bytes))
-  store.key = key
+export function saveSession() {
+  if (store.user) ssSet(SS_SESSION, JSON.stringify({ user: store.user, localPreview: store.localPreview }))
 }
 
-export async function signIn(user: User, viewKeyB64: string, localPreview = false) {
-  await openWithKey(viewKeyB64)
-  store.user = user
-  store.localPreview = localPreview
-  ssSet(SS_SESSION, JSON.stringify({ user, viewKey: viewKeyB64, localPreview }))
-}
-
-/** タブ内で再読み込みしたときはログインし直さない（セッションの期限まで） */
+/** タブ内で再読み込みしたときはログインし直さない（期限まで） */
 export async function restoreSession(): Promise<void> {
   if (store.manifest) return
   await loadPublic()
-  if (!store.pub) return
   const raw = ssGet(SS_SESSION)
   if (!raw) return
   try {
-    const s = JSON.parse(raw) as { user: User; viewKey: string; localPreview: boolean }
-    if (!s.localPreview && s.user.exp < Date.now()) throw new Error('expired')
-    await openWithKey(s.viewKey)
+    const s = JSON.parse(raw) as { user: User; localPreview: boolean }
+    if (s.user.exp < Date.now()) throw new Error('expired')
     store.user = s.user
     store.localPreview = s.localPreview
+    const { fetchManifest } = await import('./api')
+    await fetchManifest()
   } catch {
-    // 期限切れ、またはデータが作り直されて鍵が変わった
     logout()
   }
 }
 
 export function logout() {
   ssSet(SS_SESSION, null)
-  store.key = null
   store.manifest = null
   store.user = null
   store.localPreview = false

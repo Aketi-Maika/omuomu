@@ -85,7 +85,7 @@ async fn lan_guard(State(g): State<Guard>, ConnectInfo(peer): ConnectInfo<Socket
     next.run(req).await
 }
 
-pub async fn run(root: PathBuf, listen: IpAddr, port: u16, open_browser: bool) -> anyhow::Result<()> {
+pub async fn run(root: PathBuf, listen: IpAddr, port: u16, public_port: Option<u16>, open_browser: bool) -> anyhow::Result<()> {
     let cfg = Config::load(&root)?;
     let app = App { root: root.clone(), progress: Arc::new(Mutex::new(Progress::default())) };
     let dist = root.join("web").join("dist");
@@ -96,9 +96,9 @@ pub async fn run(root: PathBuf, listen: IpAddr, port: u16, open_browser: bool) -
     let api = Router::new()
         .route("/status", get(status))
         .route("/config", get(get_config).put(put_config))
-        .route("/config/new-key", post(new_key))
-        .route("/dev-key", get(dev_key))
+        .route("/dev-session", get(dev_session))
         .route("/apps-script-setup", get(apps_script_setup))
+        .route("/mirror", post(mirror_now))
         .route("/check-path", get(check_path))
         .route("/build", post(start_build))
         .route("/build/status", get(build_status))
@@ -110,9 +110,15 @@ pub async fn run(root: PathBuf, listen: IpAddr, port: u16, open_browser: bool) -
     if lan && !cfg.has_lan_password() {
         anyhow::bail!("LAN に公開するには、先に `omuomu-gallery set-password` で管理ツールのパスワードを設定してください");
     }
+    if lan {
+        eprintln!("警告: LAN に直接公開しています。通信は暗号化されません（パスワードが盗聴されるおそれ）。");
+        eprintln!("      通常は --listen を付けずに起動し、SSH トンネルで開いてください。写真の鍵は LAN 越しには渡しません。");
+    }
     let guard = Guard { root: root.clone(), ok: Arc::new(Mutex::new(HashSet::new())) };
     let router = Router::new()
         .nest("/api", api)
+        // 管理ツールの中では公開 API も同じ場所で使える（確認用ログインを受け付ける）
+        .merge(crate::public_api::router(root.clone(), true))
         .nest_service("/data", ServeDir::new(cfg.out_path(&root)))
         .fallback_service(ServeDir::new(dist))
         .layer(middleware::from_fn_with_state(guard, lan_guard));
@@ -128,6 +134,28 @@ pub async fn run(root: PathBuf, listen: IpAddr, port: u16, open_browser: bool) -
             });
         }
     }
+    // 参加者向けの公開 API（NAS の中だけで待ち受け、トンネルが外とつなぐ）
+    if let Some(pp) = public_port {
+        let pub_listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], pp))).await?;
+        let pub_router = crate::public_api::router(root.clone(), false);
+        println!("公開 API: http://127.0.0.1:{pp}/pub/health （Cloudflare Tunnel / Tailscale Funnel からここにつなぐ）");
+        tokio::spawn(async move {
+            let _ = axum::serve(pub_listener, pub_router).await;
+        });
+    }
+    // スプレッドシートへの写し（30 秒ごとに未送信分を送る）
+    {
+        let root = root.clone();
+        std::thread::spawn(move || loop {
+            if let Ok(c) = Config::load(&root) {
+                if let Err(e) = crate::store::mirror_once(&root, &c) {
+                    eprintln!("{e:#}");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+    }
+
     // Google ログインの承認済みオリジンに登録しやすいよう localhost で開く
     let url = format!("http://localhost:{port}/#/admin");
     if lan {
@@ -150,6 +178,8 @@ async fn get_config(State(app): State<App>) -> Response {
     match Config::load(&app.root) {
         Ok(mut c) => {
             c.lan_password = if c.has_lan_password() { "設定済み".into() } else { String::new() };
+            // 署名の秘密は画面に送らない
+            c.session_secret = mask(&c.session_secret);
             Json(c).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
@@ -157,10 +187,18 @@ async fn get_config(State(app): State<App>) -> Response {
 }
 
 async fn put_config(State(app): State<App>, Json(mut cfg): Json<Config>) -> Response {
-    // 鍵と LAN 用パスワードは画面から書き換えさせない
+    // 署名の秘密と LAN 用パスワードは画面から書き換えさせない
     if let Ok(cur) = Config::load(&app.root) {
-        cfg.view_key = cur.view_key;
+        cfg.session_secret = cur.session_secret;
         cfg.lan_password = cur.lan_password;
+    }
+    // 構築済みなら GitHub に置く public.json も最新の設定にしておく
+    let count = std::fs::read_to_string(cfg.store_path(&app.root).join("manifest.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|m| m["photos"].as_array().map(|a| a.len()));
+    if let Some(n) = count {
+        let _ = builder::write_public(&app.root, &cfg, n);
     }
     match cfg.save(&app.root) {
         Ok(()) => Json(json!({ "ok": true, "problems": cfg.validate(), "warnings": cfg.publish_warnings() })).into_response(),
@@ -168,28 +206,58 @@ async fn put_config(State(app): State<App>, Json(mut cfg): Json<Config>) -> Resp
     }
 }
 
-/// 鍵を作り直す（以前に配った鍵では開けなくなる。Apps Script の VIEW_KEY も更新が必要）
-async fn new_key(State(app): State<App>) -> Response {
-    let r = Config::load(&app.root).and_then(|mut c| {
-        c.view_key = crate::config::new_view_key();
-        c.save(&app.root)?;
-        Ok(c)
-    });
-    match r {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+fn mask(k: &str) -> String {
+    let c: Vec<char> = k.chars().collect();
+    if c.len() < 12 {
+        return "••••".into();
+    }
+    format!("{}••••••••••••{}", c[..6].iter().collect::<String>(), c[c.len() - 4..].iter().collect::<String>())
+}
+
+fn is_loopback(peer: &SocketAddr) -> bool {
+    match peer.ip() {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.is_loopback()).unwrap_or(v6.is_loopback()),
+        ip => ip.is_loopback(),
     }
 }
 
-/// この PC での表示確認用: Google ログインなしで写真の鍵を渡す（127.0.0.1 でしか待ち受けない）
-async fn dev_key(State(app): State<App>) -> Response {
+/// 確認用ログインや合言葉を返す API は、この機械の中（または SSH トンネル経由）からしか使えない
+fn local_only(peer: &SocketAddr) -> Option<Response> {
+    (!is_loopback(peer)).then(|| {
+        err(StatusCode::FORBIDDEN, "この操作は LAN 越しにはできません。SSH トンネル（README 参照）経由で開いてください")
+    })
+}
+
+/// 表示確認用: Google ログインなしで入る（この機械の中からのみ）
+async fn dev_session(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Some(r) = local_only(&peer) {
+        return r;
+    }
     match Config::load(&app.root) {
-        Ok(c) => Json(json!({ "viewKey": c.view_key })).into_response(),
+        Ok(c) => Json(json!({ "session": crate::public_api::local_session(&c) })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 
-async fn apps_script_setup(State(app): State<App>) -> Response {
+/// スプレッドシートへの写しを今すぐ送る
+async fn mirror_now(State(app): State<App>) -> Response {
+    let root = app.root.clone();
+    let r = tokio::task::spawn_blocking(move || {
+        let c = Config::load(&root)?;
+        crate::store::mirror_once(&root, &c)
+    })
+    .await;
+    match r {
+        Ok(Ok(n)) => Json(json!({ "ok": true, "sent": n })).into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn apps_script_setup(State(app): State<App>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+    if let Some(r) = local_only(&peer) {
+        return r;
+    }
     match Config::load(&app.root) {
         Ok(c) => Json(json!({ "code": c.apps_script_setup() })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
@@ -288,7 +356,7 @@ async fn do_publish(State(app): State<App>, Json(req): Json<PublishReq>) -> Resp
         let w: Vec<String> = cfg
             .publish_warnings()
             .into_iter()
-            .filter(|w| w.contains("クライアント ID") || w.contains("Apps Script"))
+            .filter(|w| w.contains("クライアント ID") || w.contains("公開 API の URL"))
             .collect();
         if !w.is_empty() {
             anyhow::bail!("公開する前に設定してください: {}", w.join(" / "));

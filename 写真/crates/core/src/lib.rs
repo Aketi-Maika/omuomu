@@ -1,25 +1,17 @@
-//! 写真展サイトの共通ロジック（PC の管理ツールとブラウザ(WASM)の両方で使う）
+//! 写真展サイトの共通ロジック（PC/NAS の管理ツールとブラウザ(WASM)の両方で使う）
 //!
-//! - パスワード → 鍵: Argon2id
-//! - 暗号化: AES-256-GCM（先頭 12 バイトが nonce）
-//! - 重み付き抽選
+//! - パスワードの変換: Argon2id（NAS の管理画面を LAN に公開するときのパスワード）
+//! - 重み付き抽選（回答が集まった写真を出にくくする）
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 
-pub const NONCE_LEN: usize = 12;
 pub const KEY_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("鍵の導出に失敗しました: {0}")]
     Kdf(String),
-    #[error("復号できませんでした（パスワードが違う可能性があります）")]
-    Decrypt,
-    #[error("暗号化に失敗しました")]
-    Encrypt,
 }
 
 /// Argon2id のパラメータ。public.json に平文で保存し、ブラウザ側も同じ値で鍵を作る。
@@ -48,27 +40,6 @@ pub fn derive_key(password: &str, salt: &[u8], params: KdfParams) -> Result<[u8;
         .hash_password_into(password.as_bytes(), salt, &mut out)
         .map_err(|e| Error::Kdf(e.to_string()))?;
     Ok(out)
-}
-
-/// nonce は呼び出し側で乱数生成して渡す（wasm で乱数源を持たないため）。
-pub fn encrypt(key: &[u8; KEY_LEN], nonce: [u8; NONCE_LEN], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Encrypt)?;
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .map_err(|_| Error::Encrypt)?;
-    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ct);
-    Ok(out)
-}
-
-pub fn decrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
-    if data.len() < NONCE_LEN + 16 || key.len() != KEY_LEN {
-        return Err(Error::Decrypt);
-    }
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Decrypt)?;
-    let (nonce, ct) = data.split_at(NONCE_LEN);
-    cipher.decrypt(Nonce::from_slice(nonce), ct).map_err(|_| Error::Decrypt)
 }
 
 /// 重み付き抽選。`r` は [0,1) の乱数。重みがすべて 0 以下なら None。
@@ -101,19 +72,10 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip() {
-        let key = derive_key("pass", b"0123456789abcdef", fast()).unwrap();
-        let ct = encrypt(&key, [7; 12], "写真".as_bytes()).unwrap();
-        assert_eq!(decrypt(&key, &ct).unwrap(), "写真".as_bytes());
-    }
-
-    #[test]
-    fn wrong_password_fails() {
-        let k1 = derive_key("pass", b"0123456789abcdef", fast()).unwrap();
-        let k2 = derive_key("pas5", b"0123456789abcdef", fast()).unwrap();
-        let ct = encrypt(&k1, [1; 12], b"secret").unwrap();
-        assert!(decrypt(&k2, &ct).is_err());
-        assert!(decrypt(&k1, &ct[..10]).is_err());
+    fn kdf_is_deterministic() {
+        let a = derive_key("pass", b"0123456789abcdef", fast()).unwrap();
+        assert_eq!(a, derive_key("pass", b"0123456789abcdef", fast()).unwrap());
+        assert_ne!(a, derive_key("pas5", b"0123456789abcdef", fast()).unwrap());
     }
 
     #[test]

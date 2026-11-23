@@ -1,8 +1,8 @@
 // Google でログイン（Google Identity Services）
-// ブラウザは Google から ID トークン（ログイン証明）を受け取り、Apps Script がそれを検証する
-import { login } from './api'
-import { localStatus } from './local'
-import { signIn, store } from './store'
+// ブラウザは Google から ID トークン（ログイン証明）を受け取り、NAS がそれを Google に確かめる
+import { login, signIn } from './api'
+import { clearImages } from './images'
+import { loadPublic, logout, store } from './store'
 
 declare global {
   interface Window {
@@ -36,12 +36,12 @@ export async function renderGoogleButton(
   el: HTMLElement,
   handlers: { onStart: () => void; onDone: () => void; onError: (msg: string) => void },
 ) {
-  const pub = store.pub
+  const pub = await loadPublic()
   if (!googleUsableHere()) {
-    handlers.onError('LAN のアドレスからは Google ログインを使えません。下の「管理ツールで確認」から入ってください')
+    handlers.onError('このアドレスでは Google ログインを使えません。SSH トンネル経由で localhost から開いてください')
     return
   }
-  if (!pub?.googleClientId || !pub.sheetUrl) {
+  if (!pub?.googleClientId || !store.apiBase) {
     handlers.onError('Google ログインがまだ設定されていません（管理者にお問い合わせください）')
     return
   }
@@ -49,17 +49,17 @@ export async function renderGoogleButton(
   const g = window.google.accounts.id
   g.initialize({
     client_id: pub.googleClientId,
-    // ドメインが 1 つならアカウント選択でそのドメインを優先
+    // ドメインが 1 つならアカウント選択でそのドメインを優先（判定は NAS 側で hd を確認する）
     hd: pub.allowedDomains.length === 1 ? pub.allowedDomains[0] : undefined,
     ux_mode: 'popup',
     auto_select: false,
     callback: async (resp: { credential: string }) => {
       handlers.onStart()
       try {
-        const { user, viewKey } = await login(resp.credential)
-        await signIn(user, viewKey)
+        await signIn(await login(resp.credential))
         handlers.onDone()
       } catch (e) {
+        logout()
         handlers.onError((e as Error).message || 'ログインできませんでした')
       }
     },
@@ -68,18 +68,20 @@ export async function renderGoogleButton(
   g.renderButton(el, { theme: 'outline', size: 'large', shape: 'rectangular', text: 'signin_with', locale: 'ja', width: 280 })
 }
 
-/** この PC の管理ツールで開いているときだけ: Google ログインなしで表示を確認 */
+/** 管理ツールの中で開いているときだけ: Google ログインなしで表示を確認 */
 export async function signInLocalPreview(): Promise<boolean> {
-  const st = await localStatus()
-  if (!st) return false
-  const r = await fetch('./api/dev-key')
+  await loadPublic()
+  if (!store.isLocalTool) return false
+  const r = await fetch('./api/dev-session')
   if (!r.ok) return false
-  const { viewKey } = await r.json()
-  await signIn({ email: '管理ツール', name: '管理ツール（確認用）', role: 'admin', exp: Number.MAX_SAFE_INTEGER, session: '' }, viewKey, true)
+  const { session } = await r.json()
+  await signIn({ email: 'local@管理ツール', name: '管理ツール（確認用）', role: 'admin', exp: Date.now() + 12 * 3600 * 1000, session }, true)
   return true
 }
 
-export function googleSignOut() {
+export function signOut() {
+  logout()
+  clearImages()
   try {
     window.google?.accounts.id.disableAutoSelect()
   } catch {

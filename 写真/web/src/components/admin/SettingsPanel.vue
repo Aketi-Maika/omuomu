@@ -12,7 +12,10 @@ const cfg = ref<LocalConfig | null>(null)
 const problems = ref<string[]>([])
 const warnings = ref<string[]>([])
 const adminText = ref('')
+const blockedText = ref('')
 const setupCode = ref('')
+const apiCheck = ref('')
+const mirrorMsg = ref('')
 const dirty = ref(false)
 const checks = ref<Record<string, string>>({})
 const build = ref<BuildStatus | null>(null)
@@ -27,6 +30,8 @@ onMounted(async () => {
   cfg.value = await api.getConfig()
   if (!cfg.value.photoDirs.length) cfg.value.photoDirs.push('')
   adminText.value = cfg.value.adminEmails.join('\n')
+  blockedText.value = cfg.value.blockedEmails.join('\n')
+  if (!cfg.value.allowedOrigins.length && pagesOrigin.value) cfg.value.allowedOrigins = [pagesOrigin.value]
   build.value = await api.buildStatus().catch(() => null)
   if (build.value?.running) poll()
   cfg.value.photoDirs.forEach((_, i) => check('dir' + i, cfg.value!.photoDirs[i]))
@@ -55,10 +60,14 @@ async function check(key: string, p: string) {
 async function save(): Promise<boolean> {
   if (!cfg.value) return false
   cfg.value.photoDirs = cfg.value.photoDirs.map((d) => d.trim()).filter(Boolean)
-  cfg.value.adminEmails = adminText.value
-    .split(/[\s,、]+/)
-    .map((e) => e.trim().toLowerCase())
-    .filter((e) => e.includes('@'))
+  const emails = (t: string) =>
+    t
+      .split(/[\s,、]+/)
+      .map((e) => e.trim().toLowerCase())
+      .filter((e) => e.includes('@'))
+  cfg.value.adminEmails = emails(adminText.value)
+  cfg.value.blockedEmails = emails(blockedText.value)
+  cfg.value.allowedOrigins = cfg.value.allowedOrigins.map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
   if (!cfg.value.photoDirs.length) cfg.value.photoDirs.push('')
   try {
     const r = await api.saveConfig(cfg.value)
@@ -119,20 +128,39 @@ async function copySetup() {
     toast('コピーできませんでした。枠内を選択してコピーしてください')
   }
 }
-async function regenKey() {
-  if (!confirm('写真の鍵を作り直します。すべての写真を暗号化し直し、Apps Script の VIEW_KEY も更新が必要になります。よろしいですか？')) return
-  await api.newKey()
-  cfg.value = { ...(await api.getConfig()), photoDirs: cfg.value!.photoDirs }
-  setupCode.value = ''
-  toast('鍵を作り直しました。構築し、Apps Script の設定も更新してください')
+function genToken() {
+  const a = crypto.getRandomValues(new Uint8Array(24))
+  cfg.value!.sheetToken = btoa(String.fromCharCode(...a)).replace(/[+/=]/g, '')
+  touch()
 }
-const origins = computed(() => {
-  const o = ['http://localhost:8787']
-  if (pagesUrl.value) o.unshift(pagesUrl.value.replace(/\/[^/]*\/$/, ''))
-  return o
-})
 
+/** 公開 API（トンネルの先の NAS）に外から届くか */
+async function checkApi() {
+  const u = cfg.value?.publicApiUrl.trim().replace(/\/$/, '')
+  if (!u) return
+  apiCheck.value = '確認中…'
+  try {
+    const r = await fetch(`${u}/pub/health`, { cache: 'no-store' })
+    const j = await r.json()
+    apiCheck.value = j.ok ? `✓ 届きました（${j.ready ? '写真あり' : '写真はまだ構築されていません'}）` : '✕ 応答が正しくありません'
+  } catch {
+    apiCheck.value = '✕ 届きません（トンネルが動いているか、URL を確認してください）'
+  }
+}
+
+async function mirrorNow() {
+  mirrorMsg.value = '送信中…'
+  try {
+    const r = await api.mirror()
+    mirrorMsg.value = `✓ ${r.sent} 件を送りました`
+  } catch (e) {
+    mirrorMsg.value = '✕ ' + (e as Error).message
+  }
+}
+
+const jsOrigins = computed(() => [...(pagesOrigin.value ? [pagesOrigin.value] : []), 'http://localhost:8787'])
 const pct = computed(() => (build.value && build.value.total ? Math.round((build.value.done / build.value.total) * 100) : 0))
+const pagesOrigin = computed(() => pagesUrl.value.replace(/\/[^/]*\/$/, ''))
 const pagesUrl = computed(() => {
   const r = props.local?.git.remote ?? ''
   const mm = r.match(/github\.com[:/]([^/]+)\/([^/.]+)/)
@@ -200,40 +228,70 @@ const pagesUrl = computed(() => {
       <fieldset>
         <legend>Google ログイン</legend>
         <p class="help">
-          参加者は Google アカウントでログインして入場します。許可したドメインのアカウントだけが写真を見られ、
-          回答・入場・管理室の操作はメールアドレス付きでスプレッドシートに記録されます。手順は README の「Google ログインの準備」を参照してください。
+          参加者は Google アカウントでログインします。NAS が Google にログイン証明を確かめ、許可した組織（Google Workspace）の
+          アカウントと管理者にだけ、写真を 1 枚ずつ返します。設定を変えると、ログイン中の人にも次の操作からすぐ効きます。
         </p>
-        <label class="f">OAuth クライアント ID（Google Cloud →「認証情報」→ ウェブアプリケーション）
+        <label class="f">OAuth クライアント ID（Google Cloud →「Google Auth Platform」→「クライアント」）
           <input v-model="cfg.googleClientId" class="input" placeholder="1234567890-xxxx.apps.googleusercontent.com" @input="touch" />
         </label>
-        <p class="help">クライアントの「承認済みの JavaScript 生成元」には次を登録します: <code v-for="o in origins" :key="o" class="origin">{{ o }}</code></p>
+        <p class="help">クライアントの「承認済みの JavaScript 生成元」には次を登録します: <code v-for="o in jsOrigins" :key="o" class="origin">{{ o }}</code></p>
         <div class="two">
-          <label class="f">ログインを許可するドメイン（複数はカンマ区切り）
+          <label class="f">ログインを許可する組織のドメイン（複数はカンマ区切り）
             <input v-model="cfg.allowedDomain" class="input" placeholder="example.ac.jp" @input="touch" />
           </label>
-          <label class="f">管理者のメールアドレス（1 行に 1 つ。ドメイン外でも可）
+          <label class="f">ログインの有効時間（時間）
+            <input v-model.number="cfg.sessionHours" class="input" type="number" min="1" max="72" @input="touch" />
+          </label>
+          <label class="f">管理者のメールアドレス（1 行に 1 つ。組織外でも可）
             <textarea v-model="adminText" class="input area" rows="3" placeholder="you@example.ac.jp" @input="touch"></textarea>
           </label>
+          <label class="f">入場を止めるアカウント（1 行に 1 つ。すぐに効きます）
+            <textarea v-model="blockedText" class="input area" rows="3" placeholder="someone@example.ac.jp" @input="touch"></textarea>
+          </label>
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>写真の配信（NAS の公開 API）</legend>
+        <p class="help">
+          写真と名簿は NAS の外に出しません。参加者のブラウザは、Cloudflare Tunnel / Tailscale Funnel を通って NAS の公開 API から
+          写真を受け取ります（手順は nas/README.md）。
+        </p>
+        <label class="f">公開 API の URL（トンネルで外から届く https のアドレス）
+          <div class="pathrow">
+            <input v-model="cfg.publicApiUrl" class="input" placeholder="https://photos.example.com" @input="touch" @change="checkApi" />
+            <button class="btn small" @click="checkApi">接続を確認</button>
+          </div>
+        </label>
+        <p class="help">{{ apiCheck }}</p>
+        <label class="f">公開 API を呼んでよいサイト（1 行に 1 つ。GitHub Pages のアドレス）
+          <textarea
+            :value="cfg.allowedOrigins.join('\n')"
+            class="input area"
+            rows="2"
+            :placeholder="pagesOrigin || 'https://ユーザー名.github.io'"
+            @input="((cfg.allowedOrigins = ($event.target as HTMLTextAreaElement).value.split('\n')), touch())"
+          ></textarea>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>スプレッドシートへの写し（任意）</legend>
+        <p class="help">回答と操作ログは NAS に保存されます。Google スプレッドシートにも写したいときは、Apps Script を用意して URL と合言葉を入れます（NAS から 30 秒ごとに送ります）。</p>
         <label class="f">Apps Script ウェブアプリの URL
           <input v-model="cfg.sheetUrl" class="input" placeholder="https://script.google.com/macros/s/…/exec" @input="touch" />
         </label>
-
-        <div class="keybox">
-          <div>
-            <div class="label">写真の鍵</div>
-            <code class="key">{{ cfg.viewKey.slice(0, 6) }}••••••••••••••••••••{{ cfg.viewKey.slice(-4) }}</code>
-            <p class="help">Apps Script が、許可したアカウントにだけこの鍵を渡します。鍵はこの PC と Apps Script の中にだけ置きます。</p>
-          </div>
-          <div class="kb">
-            <button class="btn small" @click="showSetup">Apps Script に貼る設定を表示</button>
-            <button class="btn small" @click="regenKey">鍵を作り直す</button>
-          </div>
+        <label class="f">合言葉（NAS と Apps Script で共有）
+          <div class="pathrow"><input v-model="cfg.sheetToken" class="input" @input="touch" /><button class="btn small" @click="genToken">生成</button></div>
+        </label>
+        <div class="kb mt">
+          <button class="btn small" :disabled="!cfg.sheetToken" @click="showSetup">Apps Script に貼る設定を表示</button>
+          <button class="btn small" :disabled="!cfg.sheetUrl" @click="mirrorNow">今すぐ送る</button>
+          <span class="help">{{ mirrorMsg }}</span>
         </div>
         <div v-if="setupCode" class="setup">
           <pre class="log">{{ setupCode }}</pre>
           <button class="btn small fill" @click="copySetup">コピー</button>
-          <p class="help">ドメイン・管理者・鍵を変えたときは、もう一度貼り付けて実行してください（ウェブアプリの再デプロイは不要です）。</p>
         </div>
       </fieldset>
 
@@ -261,7 +319,7 @@ const pagesUrl = computed(() => {
           <div class="stepbox">
             <div class="label">STEP 1</div>
             <h3 class="serif">構築</h3>
-            <p class="help">NAS から写真を読み込み、縮小・暗号化して公開用データを作ります。2 回目以降は増えた写真だけを処理します。</p>
+            <p class="help">写真を読み込み、縮小して位置情報などを消し、NAS の中の保存先に置きます。2 回目以降は増えた写真だけ処理します。</p>
             <button class="btn fill" :disabled="build?.running" @click="startBuild">{{ build?.running ? '構築中…' : '保存して構築' }}</button>
             <div v-if="build && (build.running || build.log.length)" class="progress">
               <div class="pbar"><i :style="{ width: (build.running ? pct : 100) + '%' }"></i></div>
@@ -273,7 +331,7 @@ const pagesUrl = computed(() => {
             <div class="label">STEP 2</div>
             <h3 class="serif">公開</h3>
             <p class="help">
-              暗号化済みのデータだけを GitHub に送ります（元の写真・名簿・鍵は送りません）。
+              GitHub に送るのは表示用の文言と接続先（public.json）だけです。写真・名簿・回答は NAS の外に出ません。
               ブランチ: <b>{{ local.git.branch ?? '不明' }}</b>
             </p>
             <input v-model="commitMsg" class="input" aria-label="コミットメッセージ" />

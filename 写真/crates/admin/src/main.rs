@@ -6,11 +6,15 @@
 //!   オプション:
 //!     --listen 0.0.0.0   LAN の他の機械からも開けるようにする（NAS に常駐させるとき）
 //!     --port N           ポート番号（既定 8787）
+//!     --public-port N    参加者向けの公開 API を 127.0.0.1:N で待ち受ける（NAS で常駐させるとき。既定なし）
 //!     --root DIR         プロジェクトフォルダー（`写真`）の場所
 //!     --no-open          ブラウザを自動で開かない
 
+mod auth;
 mod builder;
 mod config;
+mod public_api;
+mod store;
 mod publish;
 mod roster;
 mod server;
@@ -52,6 +56,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = find_root(opt(&args, "--root"));
     let port = opt(&args, "--port").and_then(|p| p.parse().ok()).unwrap_or(8787);
+    let public_port: Option<u16> = opt(&args, "--public-port").and_then(|p| p.parse().ok());
     let listen: IpAddr = opt(&args, "--listen").and_then(|p| p.parse().ok()).unwrap_or(IpAddr::from([127, 0, 0, 1]));
 
     match args.first().map(|s| s.as_str()) {
@@ -79,5 +84,5 @@ fn main() -> anyhow::Result<()> {
     }
 
     let open_browser = !args.iter().any(|a| a == "--no-open") && listen.is_loopback();
-    tokio::runtime::Runtime::new()?.block_on(server::run(root, listen, port, open_browser))
+    tokio::runtime::Runtime::new()?.block_on(server::run(root, listen, port, public_port, open_browser))
 }

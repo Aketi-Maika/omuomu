@@ -1,4 +1,4 @@
-/** public.json（平文。写真や名前は含まない） */
+/** public.json（GitHub に置く表示用の文言と接続先。写真や名前は含まない） */
 export interface PublicInfo {
   v: number
   title: string
@@ -8,12 +8,12 @@ export interface PublicInfo {
   count: number
   googleClientId: string
   allowedDomains: string[]
-  sheetUrl: string
-  keyCheck: string
+  /** 公開 API（NAS）の URL */
+  apiBase: string
   builtAt: number
 }
 
-/** ログイン中の利用者（メールアドレスは Apps Script が Google のログイン証明から確認したもの） */
+/** ログイン中の利用者（メールアドレスは NAS が Google のログイン証明から確認したもの） */
 export interface User {
   email: string
   name: string
@@ -34,11 +34,11 @@ export interface Photo {
   h: number
   title: string
   folder: string
-  /** 名簿(Excel)に登録済みの「写っている人」 */
-  seed: string[]
+  /** 名簿(Excel)に登録済みの「写っている人」（管理者にだけ届く） */
+  seed?: string[]
 }
 
-/** manifest.enc の中身 */
+/** 名簿・写真一覧（NAS の公開 API から取得） */
 export interface Manifest {
   title: string
   groups: string[]

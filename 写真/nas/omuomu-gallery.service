@@ -9,7 +9,9 @@ User=omuomu
 Group=omuomu
 Environment=HOME=/var/lib/omuomu
 Environment=LANG=C.UTF-8
-ExecStart=/opt/omuomu/bin/omuomu-gallery --root "@ROOT@" --listen 0.0.0.0 --port @PORT@ --no-open
+# 管理画面(8787)と公開 API(8788)は NAS の中（127.0.0.1）だけで待ち受ける。
+# 管理画面は SSH トンネルで、公開 API は Tailscale Funnel / Cloudflare Tunnel で外とつなぐ
+ExecStart=/opt/omuomu/bin/omuomu-gallery --root "@ROOT@" --port @PORT@ --public-port 8788 --no-open
 Restart=on-failure
 RestartSec=5
 # Atom で写真の縮小中も Samba が重くならないように

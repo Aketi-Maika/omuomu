@@ -8,6 +8,6 @@ export default defineConfig({
   build: { target: 'es2020', assetsInlineLimit: 0 },
   server: {
     // npm run dev 中もローカル管理ツールの API を使えるように
-    proxy: { '/api': 'http://127.0.0.1:8787' },
+    proxy: { '/api': 'http://127.0.0.1:8787', '/pub': 'http://127.0.0.1:8787' },
   },
 })

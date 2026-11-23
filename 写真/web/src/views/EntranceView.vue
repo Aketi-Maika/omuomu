@@ -72,10 +72,11 @@ async function enterLocal() {
           <template v-else-if="error">{{ error }}</template>
           <template v-else>
             {{ store.pub?.allowedDomains.length ? `@${store.pub.allowedDomains.join(' / @')} の Google アカウントで入場できます。` : 'Google アカウントで入場します。' }}<br />
-            入場・回答の記録には、ログインしたアカウントのメールアドレスが残ります。
+            入場・回答の記録には、ログインしたアカウントのメールアドレスが残ります。<br />
+            写真はログインを確かめたうえで 1 枚ずつ表示し、端末には保存しません。
           </template>
         </p>
-        <button v-if="isLocal" class="local-btn" :disabled="busy" @click="enterLocal">管理ツールで確認（Google ログインなし・記録はこの端末だけ）</button>
+        <button v-if="isLocal" class="local-btn" :disabled="busy" @click="enterLocal">管理ツールで確認（Google ログインなし）</button>
       </div>
     </section>
 

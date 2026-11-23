@@ -1,18 +1,15 @@
-//! NAS の写真 → 縮小・暗号化 → web/public/data に公開データを出力
+//! NAS の写真 → 縮小（EXIF 削除）→ NAS の中の保存先へ
 //!
 //! 出力:
-//!   public.json   … 平文。タイトル・Google ログインの設定（写真や名前は含まない）
-//!   manifest.enc  … 写真の鍵で暗号化。名簿・写真一覧・設定
-//!   img/<id>.bin, img/<id>_t.bin … 写真の鍵で暗号化した写真（本画像・サムネイル）
-//!
-//! 写真の鍵は Google ログインに成功し、許可されたアカウントにだけ Apps Script が渡す。
+//!   <store>/img/<id>.jpg, <id>_t.jpg … 公開用に縮小した写真（NAS の中だけ。公開 API がログインを確かめて 1 枚ずつ返す）
+//!   <store>/manifest.json            … 名簿・写真一覧・設定（NAS の中だけ）
+//!   web/public/data/public.json      … GitHub に置く表示用の文言と接続先（写真や名前は含まない）
 
 use crate::config::{Config, CACHE_FILE};
 use crate::roster::{self, Person};
 use anyhow::{bail, Context, Result};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
-use rand::RngCore;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -70,14 +67,35 @@ pub struct PublicInfo {
     pub count: usize,
     pub google_client_id: String,
     pub allowed_domains: Vec<String>,
-    pub sheet_url: String,
-    /// 鍵が正しいかをブラウザで確かめるための指紋（鍵そのものではない）
-    pub key_check: String,
+    /// 公開 API（NAS）の URL
+    pub api_base: String,
     pub built_at: u64,
 }
 
-pub fn key_check(key: &[u8; 32]) -> String {
-    blake3::keyed_hash(key, b"omuomu-key-check").to_hex()[..16].to_string()
+/// GitHub に置く public.json を書く（設定を変えただけのときも使う）
+pub fn write_public(root: &Path, cfg: &Config, count: usize) -> Result<PathBuf> {
+    let out = cfg.out_path(root);
+    std::fs::create_dir_all(&out)?;
+    // 旧方式の暗号化データが残っていれば消す（公開用フォルダーには public.json だけを置く）
+    std::fs::remove_dir_all(out.join("img")).ok();
+    for f in ["manifest.enc", "admin.enc"] {
+        std::fs::remove_file(out.join(f)).ok();
+    }
+    let public = PublicInfo {
+        v: 3,
+        title: cfg.title.clone(),
+        subtitle: cfg.subtitle.clone(),
+        period: cfg.period.clone(),
+        notice: cfg.notice.clone(),
+        count,
+        google_client_id: cfg.google_client_id.trim().into(),
+        allowed_domains: cfg.domains(),
+        api_base: cfg.public_api_url.trim().trim_end_matches('/').into(),
+        built_at: now(),
+    };
+    let p = out.join("public.json");
+    std::fs::write(&p, serde_json::to_string_pretty(&public)?)?;
+    Ok(p)
 }
 
 #[derive(Serialize)]
@@ -116,7 +134,6 @@ struct Manifest {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Cache {
-    key_fingerprint: String,
     settings: String,
     pub photos: HashMap<String, CachedPhoto>,
 }
@@ -143,16 +160,6 @@ pub fn person_id(name: &str) -> String {
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn rand_bytes<const N: usize>() -> [u8; N] {
-    let mut b = [0u8; N];
-    rand::thread_rng().fill_bytes(&mut b);
-    b
-}
-
-fn encrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
-    Ok(gallery_core::encrypt(key, rand_bytes::<12>(), data)?)
 }
 
 fn open_image(bytes: &[u8]) -> Result<DynamicImage> {
@@ -226,20 +233,17 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
     if !errs.is_empty() {
         bail!(errs.join(" / "));
     }
-    let out = cfg.out_path(root);
-    let img_dir = out.join("img");
-    std::fs::create_dir_all(&img_dir).with_context(|| format!("出力先を作れません: {}", out.display()))?;
+    let store = cfg.store_path(root);
+    let img_dir = store.join("img");
+    std::fs::create_dir_all(&img_dir).with_context(|| format!("保存先を作れません: {}", store.display()))?;
     let mut warnings = vec![];
 
-    // --- 鍵（設定ファイルの鍵が同じなら、前回暗号化した画像を使い回す）
-    let view_key = cfg.view_key_bytes().ok_or_else(|| anyhow::anyhow!("写真の鍵が正しくありません"))?;
-    let key_fp = blake3::hash(&view_key).to_hex()[..16].to_string();
     let settings_fp = format!("{}:{}:{}", cfg.max_size, cfg.thumb_size, cfg.jpeg_quality);
 
     let mut cache = load_cache(root);
-    let cache_valid = cache.key_fingerprint == key_fp && cache.settings == settings_fp;
+    let cache_valid = cache.settings == settings_fp;
     if !cache_valid && !cache.photos.is_empty() {
-        log(progress, "鍵または画質設定が変わったため、すべての写真を作り直します");
+        log(progress, "画質の設定が変わったため、すべての写真を作り直します");
     }
 
     // --- 名簿
@@ -264,7 +268,7 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
         let mut p = progress.lock().unwrap();
         p.total = files.len();
         p.done = 0;
-        p.phase = "写真を暗号化しています".into();
+        p.phase = "写真を縮小しています".into();
     }
     log(progress, format!("写真: {} 枚", files.len()));
 
@@ -277,8 +281,8 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
                 let bytes = std::fs::read(path).with_context(|| format!("読めません: {}", path.display()))?;
                 let id = blake3::hash(&bytes).to_hex()[..16].to_string();
                 let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                let full_p = img_dir.join(format!("{id}.bin"));
-                let thumb_p = img_dir.join(format!("{id}_t.bin"));
+                let full_p = img_dir.join(format!("{id}.jpg"));
+                let thumb_p = img_dir.join(format!("{id}_t.jpg"));
                 if cache_valid {
                     if let Some(c) = cache.photos.get(&id) {
                         if full_p.exists() && thumb_p.exists() {
@@ -291,8 +295,8 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
                 let img = open_image(&bytes).with_context(|| format!("画像として開けません: {}", path.display()))?;
                 let full = shrink(&img, cfg.max_size);
                 let thumb = shrink(&full, cfg.thumb_size);
-                std::fs::write(&full_p, encrypt(&view_key, &to_jpeg(&full, cfg.jpeg_quality)?)?)?;
-                std::fs::write(&thumb_p, encrypt(&view_key, &to_jpeg(&thumb, 78)?)?)?;
+                std::fs::write(&full_p, to_jpeg(&full, cfg.jpeg_quality)?)?;
+                std::fs::write(&thumb_p, to_jpeg(&thumb, 78)?)?;
                 encoded.fetch_add(1, Ordering::Relaxed);
                 let c = CachedPhoto { w: full.width(), h: full.height(), hash: fingerprint(&thumb), src: path.to_string_lossy().into_owned() };
                 Ok((PhotoEntry { id, w: c.w, h: c.h, title, folder: folder.clone(), seed: vec![] }, c))
@@ -360,13 +364,13 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
     photos.sort_by(|a, b| (&a.folder, &a.title).cmp(&(&b.folder, &b.title)));
 
     // --- 使われなくなった画像を削除
-    let keep: HashSet<String> = photos.iter().flat_map(|p| [format!("{}.bin", p.id), format!("{}_t.bin", p.id)]).collect();
+    let keep: HashSet<String> = photos.iter().flat_map(|p| [format!("{}.jpg", p.id), format!("{}_t.jpg", p.id)]).collect();
     let mut removed = 0;
     for e in std::fs::read_dir(&img_dir)?.flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
-        if n.ends_with(".bin") && !keep.contains(&n) {
+        if n.ends_with(".jpg") && !keep.contains(&n) {
             std::fs::remove_file(e.path()).ok();
-            if !n.ends_with("_t.bin") {
+            if !n.ends_with("_t.jpg") {
                 removed += 1;
             }
         }
@@ -394,25 +398,9 @@ pub fn build(root: &Path, cfg: &Config, progress: &SharedProgress) -> Result<Rep
         low_weight: cfg.low_weight,
         majority: cfg.majority,
     };
-    std::fs::write(out.join("manifest.enc"), encrypt(&view_key, &serde_json::to_vec(&manifest)?)?)?;
-    // 旧方式（パスワード）の名残があれば消す
-    std::fs::remove_file(out.join("admin.enc")).ok();
-    let public = PublicInfo {
-        v: 2,
-        title: cfg.title.clone(),
-        subtitle: cfg.subtitle.clone(),
-        period: cfg.period.clone(),
-        notice: cfg.notice.clone(),
-        count: photos.len(),
-        google_client_id: cfg.google_client_id.trim().into(),
-        allowed_domains: cfg.domains(),
-        sheet_url: cfg.sheet_url.trim().into(),
-        key_check: key_check(&view_key),
-        built_at: now(),
-    };
-    std::fs::write(out.join("public.json"), serde_json::to_string_pretty(&public)?)?;
+    std::fs::write(store.join("manifest.json"), serde_json::to_vec(&manifest)?)?;
+    write_public(root, cfg, photos.len())?;
 
-    cache.key_fingerprint = key_fp;
     cache.settings = settings_fp;
     cache.photos = new_cache;
     std::fs::write(root.join(CACHE_FILE), serde_json::to_string(&cache)?)?;

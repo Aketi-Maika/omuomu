@@ -8,10 +8,10 @@ import PhotoCard from '../components/PhotoCard.vue'
 import NamePicker from '../components/NamePicker.vue'
 import EncImg from '../components/EncImg.vue'
 import { SessionExpired, fetchStats, isMock, sessionId, submitResponse } from '../lib/api'
-import { googleSignOut } from '../lib/auth'
+import { signOut } from '../lib/auth'
 import { drawNext } from '../lib/draw'
 import { preload } from '../lib/images'
-import { logout, store } from '../lib/store'
+import { store } from '../lib/store'
 import { FIXED, type FixedCounts, type Photo } from '../lib/types'
 
 const router = useRouter()
@@ -88,7 +88,7 @@ async function record() {
     })
     seen.add(p.id)
     pushHistory(`写っている人 ${total.value}名`)
-    toast(isMock() ? '記録しました（確認モード：この端末にだけ保存）' : '記録しました')
+    toast('記録しました')
     next()
   } catch (e) {
     console.error(e)
@@ -130,8 +130,7 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 function leave() {
-  logout()
-  googleSignOut()
+  signOut()
   router.push('/')
 }
 
@@ -192,7 +191,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </template>
-      <p v-if="isMock()" class="mock">確認モード：回答はこの端末にだけ保存されます</p>
+      <p v-if="isMock()" class="mock">確認モード：管理ツールのアカウントとして記録します</p>
       <p v-else class="signed">{{ store.user?.email }} として記録します</p>
     </aside>
 

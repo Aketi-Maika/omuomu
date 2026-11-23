@@ -23,6 +23,7 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tower-http = { version = "0.5", features = ["fs"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+ureq = { version = "2", features = ["json"] }
 walkdir = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }

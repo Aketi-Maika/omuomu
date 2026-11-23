@@ -2,9 +2,7 @@
 // 人物を選ぶ → その人が写っている写真を一覧 → ZIP で一括ダウンロード
 import { computed, inject, ref, watch } from 'vue'
 import EncImg from '../EncImg.vue'
-import { emptyStat, logEvent } from '../../lib/api'
-import { makeZip } from '../../lib/crypto'
-import { imageBytes } from '../../lib/images'
+import { downloadZip as fetchZip, emptyStat, logEvent } from '../../lib/api'
 import { local as localApi, type LocalStatus } from '../../lib/local'
 import { store } from '../../lib/store'
 import { FIXED, type Photo } from '../../lib/types'
@@ -35,7 +33,7 @@ function judge(p: Photo, id: string): { hit: boolean; votes: number; n: number; 
   const st = store.stats[p.id] ?? emptyStat()
   const f = FIXED.find((x) => x.id === id)
   const votes = f ? st[f.key] : st.people[id] ?? 0
-  const seed = useSeed.value && p.seed.includes(id)
+  const seed = useSeed.value && (p.seed ?? []).includes(id)
   const hit = seed || (st.n > 0 && votes / st.n >= majority.value / 100)
   return { hit, votes, n: st.n, seed }
 }
@@ -90,30 +88,21 @@ async function downloadZip() {
   if (!list.length) return
   zipping.value = 1
   try {
-    const names: string[] = []
-    const files: Uint8Array[] = []
-    for (const [i, r] of list.entries()) {
-      files.push(await imageBytes(r.p.id))
-      names.push(`${String(r.no).padStart(3, '0')}_${r.p.title}.jpg`)
-      zipping.value = Math.round(((i + 1) / list.length) * 100)
-    }
-    const zip = await makeZip(names, files)
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }))
     const label = picked.value.map(nameOf).join('_').slice(0, 40)
-    a.download = `写真_${label}.zip`
+    const blob = await fetchZip(
+      list.map((r) => r.p.id),
+      label,
+      picked.value.map(nameOf),
+    )
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `写真_${label || '選択'}.zip`
     a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 10000)
-    toast(`${list.length} 点を ZIP にしました`)
-    logEvent('ZIPダウンロード', {
-      people: picked.value.map(nameOf),
-      mode: mode.value,
-      count: list.length,
-      photos: list.map((r) => r.p.title),
-    })
+    toast(`${list.length} 点を ZIP にしました（NAS に記録されました）`)
   } catch (e) {
     console.error(e)
-    toast('ZIP を作れませんでした')
+    toast('ZIP を作れませんでした: ' + (e as Error).message)
   } finally {
     zipping.value = 0
   }
@@ -173,7 +162,7 @@ async function exportOriginals() {
         </div>
         <div class="dl">
           <button class="btn fill" :disabled="!checked.length || zipping > 0" @click="downloadZip">
-            {{ zipping ? `ZIP を作成中… ${zipping}%` : `選択した ${checked.length} 点を ZIP でダウンロード` }}
+            {{ zipping ? 'ZIP を作成中…' : `選択した ${checked.length} 点を ZIP でダウンロード` }}
           </button>
         </div>
       </div>

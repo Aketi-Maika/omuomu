@@ -19,8 +19,8 @@ rm -rf dist-nas
 mkdir -p "$OUT"
 cp target/x86_64-unknown-linux-musl/release/omuomu-gallery "$OUT/"
 cp -r web/dist "$OUT/web-dist"
-rm -rf "$OUT/web-dist/data"   # 公開データは NAS 側で構築する
-cp nas/01-storage.sh nas/02-share.sh nas/03-gallery.sh nas/omuomu-gallery.service nas/README.md "$OUT/"
+rm -rf "$OUT/web-dist/data"   # 表示用データは NAS 側で構築する
+cp nas/01-storage.sh nas/02-share.sh nas/03-gallery.sh nas/04-tunnel.sh nas/omuomu-gallery.service nas/README.md "$OUT/"
 if [[ -f gallery.config.json ]]; then
   # 写真の鍵・Google ログインの設定を NAS に引き継ぐ（パスは NAS 側で設定し直す）
   python -I - "$OUT/gallery.config.json" <<'PY'

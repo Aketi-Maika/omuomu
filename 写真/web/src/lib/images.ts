@@ -1,6 +1,6 @@
-// 暗号化された写真を取得・復号して object URL にする（同じ写真は使い回す）
-import { fetchDecrypt } from './crypto'
-import { DATA, store } from './store'
+// NAS から写真を 1 枚ずつ取得して object URL にする（同じ写真は使い回す）
+// 写真はログインを確かめてから NAS が返す。ブラウザのメモリにだけ置き、タブを閉じると消える
+import { call } from './api'
 
 const cache = new Map<string, Promise<string>>()
 const order: string[] = []
@@ -10,9 +10,9 @@ export function imageUrl(id: string, thumb = false): Promise<string> {
   const k = id + (thumb ? '_t' : '')
   let p = cache.get(k)
   if (!p) {
-    const key = store.key
-    if (!key) return Promise.reject(new Error('locked'))
-    p = fetchDecrypt(key, `${DATA}img/${k}.bin`).then((b) => URL.createObjectURL(new Blob([b], { type: 'image/jpeg' })))
+    p = call(`/pub/photo/${id}${thumb ? '?t=1' : ''}`)
+      .then((r) => r.blob())
+      .then((b) => URL.createObjectURL(b))
     p.catch(() => cache.delete(k))
     cache.set(k, p)
     order.push(k)
@@ -25,8 +25,10 @@ export function imageUrl(id: string, thumb = false): Promise<string> {
   return p
 }
 
-export async function imageBytes(id: string): Promise<Uint8Array> {
-  return fetchDecrypt(store.key!, `${DATA}img/${id}.bin`)
+export function clearImages() {
+  for (const p of cache.values()) p.then((u) => URL.revokeObjectURL(u)).catch(() => {})
+  cache.clear()
+  order.length = 0
 }
 
 export function preload(id: string) {

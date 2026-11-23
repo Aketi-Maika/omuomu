@@ -69,32 +69,21 @@ fi
 chown -R "$SVC_USER:$SVC_USER" "$ROOT/web/dist"
 [[ -f "$ROOT/gallery.config.json" ]] && chown "$SVC_USER:$SVC_USER" "$ROOT/gallery.config.json" && chmod 600 "$ROOT/gallery.config.json"
 
-# --- LAN から開くときのパスワード
-if ! grep -q '"lanPassword": *"[^"]*\$' "$ROOT/gallery.config.json" 2>/dev/null; then
-  echo
-  while true; do
-    read -r -s -p "管理画面（LAN から開く）のパスワードを決めてください（8 文字以上）: " P1; echo
-    read -r -s -p "もう一度: " P2; echo
-    [[ "$P1" == "$P2" ]] && (( ${#P1} >= 8 )) && break
-    echo "一致しないか、8 文字未満です"
-  done
-  printf '%s\n' "$P1" | as_svc /opt/omuomu/bin/omuomu-gallery --root "$ROOT" set-password
-  chmod 600 "$ROOT/gallery.config.json"
-fi
-
 # --- 常駐（systemd）
 sed -e "s#@ROOT@#$ROOT#g" -e "s#@PORT@#$PORT#g" "$HERE/omuomu-gallery.service" > /etc/systemd/system/omuomu-gallery.service
 systemctl daemon-reload
 systemctl enable omuomu-gallery
 systemctl restart omuomu-gallery
 
-firewall-cmd --permanent --add-port=$PORT/tcp
+# 以前の版で開けていたポートを閉じる（管理画面は SSH トンネル経由でのみ開く）
+firewall-cmd --permanent --remove-port=$PORT/tcp >/dev/null 2>&1 || true
 firewall-cmd --reload
 
 sleep 2
 systemctl --no-pager --lines=5 status omuomu-gallery || true
 IP=$(hostname -I | awk '{print $1}')
 echo
-echo "完了しました。LAN の PC のブラウザで次を開いてください（ユーザー名は何でも可、パスワードは今決めたもの）:"
-echo "  http://$IP:$PORT/#/admin"
+echo "完了しました。管理画面は NAS の中だけで動いています。PC から開くには、PC の PowerShell で:"
+echo "  ssh -N -L $PORT:localhost:$PORT root@$IP"
+echo "を実行したまま、ブラウザで http://localhost:$PORT/#/admin を開いてください（通信は SSH で暗号化されます）。"
 echo "設定画面の写真フォルダーは /srv/nas/photos/（フォルダー名）、名簿は /srv/nas/photos/写真登録.xlsx のように指定します。"

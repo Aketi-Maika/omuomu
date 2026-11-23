@@ -7,8 +7,8 @@ import StatusPanel from '../components/admin/StatusPanel.vue'
 import SettingsPanel from '../components/admin/SettingsPanel.vue'
 import LogPanel from '../components/admin/LogPanel.vue'
 import { fetchStats, logEvent } from '../lib/api'
-import { googleSignOut, renderGoogleButton, signInLocalPreview } from '../lib/auth'
-import { loadPublic, logout, restoreSession, store } from '../lib/store'
+import { renderGoogleButton, signInLocalPreview, signOut } from '../lib/auth'
+import { loadPublic, restoreSession, store } from '../lib/store'
 import { localStatus, type LocalStatus } from '../lib/local'
 
 const router = useRouter()
@@ -60,8 +60,7 @@ async function enterLocal() {
 }
 
 function leave() {
-  logout()
-  googleSignOut()
+  signOut()
   router.push('/')
 }
 </script>

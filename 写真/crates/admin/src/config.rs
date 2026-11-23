@@ -1,4 +1,4 @@
-//! 管理画面から編集する設定。`gallery.config.json`（写真を開く鍵を含むので git には入れない）
+//! 管理画面から編集する設定。`gallery.config.json`（ログインの署名鍵などを含むので git には入れない）
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -12,21 +12,29 @@ pub const CACHE_FILE: &str = ".gallery-cache.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
-    /// 写真フォルダー（NAS の UNC パス \\NAS\share\... やドライブ文字のパス）。複数可
+    /// 写真フォルダー（NAS の /srv/nas/photos/... や UNC パス \\NAS\share\...）。複数可
     pub photo_dirs: Vec<String>,
     /// 名簿（.xlsx / .csv）。xlsx のセル内画像は「写っている写真」の登録済みデータとして取り込む
     pub roster_path: String,
 
     /// Google Cloud で作った OAuth クライアント ID（ウェブアプリ）
     pub google_client_id: String,
-    /// ログインを許可するドメイン（例: example.ac.jp）。カンマ区切りで複数可
+    /// ログインを許可する組織のドメイン（例: example.ac.jp）。カンマ区切りで複数可
     pub allowed_domain: String,
     /// 管理室に入れるアカウント（メールアドレス）
     pub admin_emails: Vec<String>,
-    /// Google Apps Script ウェブアプリの URL（ログイン・回答・ログの保存先）
+    /// 入場を止めるアカウント（ドメインが許可されていても入れない）
+    pub blocked_emails: Vec<String>,
+    /// ログインの有効時間
+    pub session_hours: u32,
+    /// 公開 API の URL（Cloudflare Tunnel / Tailscale Funnel で外から届く https のアドレス）
+    pub public_api_url: String,
+    /// 公開 API を呼んでよいサイト（GitHub Pages のオリジンなど）
+    pub allowed_origins: Vec<String>,
+
+    /// Google スプレッドシートへの写し（Apps Script の URL と合言葉。空なら写さない）
     pub sheet_url: String,
-    /// 写真を暗号化する鍵（自動生成。Apps Script のスクリプトプロパティ VIEW_KEY にも同じ値を設定）
-    pub view_key: String,
+    pub sheet_token: String,
 
     pub title: String,
     pub subtitle: String,
@@ -44,10 +52,15 @@ pub struct Config {
     pub max_size: u32,
     pub thumb_size: u32,
     pub jpeg_quality: u8,
-    /// 出力先（プロジェクトフォルダーからの相対パス）
+    /// GitHub に置く表示用データの出力先（public.json だけ）
     pub out_dir: String,
-    /// NAS に常駐させて LAN から開くときのパスワード（"salt$hash"。set-password で設定）
+    /// NAS の中だけに置く写真・名簿・回答の保存先（git には入れない）
+    pub store_dir: String,
+
+    /// NAS の管理画面を LAN に直接公開するときのパスワード（"salt$hash"）
     pub lan_password: String,
+    /// ログインの署名に使う秘密（自動生成）
+    pub session_secret: String,
 }
 
 impl Default for Config {
@@ -58,8 +71,12 @@ impl Default for Config {
             google_client_id: String::new(),
             allowed_domain: String::new(),
             admin_emails: vec![],
+            blocked_emails: vec![],
+            session_hours: 8,
+            public_api_url: String::new(),
+            allowed_origins: vec![],
             sheet_url: String::new(),
-            view_key: String::new(),
+            sheet_token: String::new(),
             title: "あの日の、わたしたち。".into(),
             subtitle: "Portraits of Us — who is in the picture?".into(),
             period: String::new(),
@@ -71,19 +88,25 @@ impl Default for Config {
             thumb_size: 480,
             jpeg_quality: 82,
             out_dir: "web/public/data".into(),
+            store_dir: ".private".into(),
             lan_password: String::new(),
+            session_secret: String::new(),
         }
     }
 }
 
-pub fn new_view_key() -> String {
-    let mut k = [0u8; 32];
+pub fn random_b64(n: usize) -> String {
+    let mut k = vec![0u8; n];
     rand::thread_rng().fill_bytes(&mut k);
     B64.encode(k)
 }
 
+fn norm_list(v: &[String]) -> Vec<String> {
+    v.iter().map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')).collect()
+}
+
 impl Config {
-    /// 読み込み。鍵が無ければ生成して保存する
+    /// 読み込み。署名の秘密が無ければ生成して保存する
     pub fn load(root: &Path) -> Result<Self> {
         let p = root.join(CONFIG_FILE);
         let mut cfg: Self = if p.exists() {
@@ -92,8 +115,8 @@ impl Config {
         } else {
             Self::default()
         };
-        if cfg.view_key_bytes().is_none() {
-            cfg.view_key = new_view_key();
+        if cfg.session_secret.len() < 32 {
+            cfg.session_secret = random_b64(32);
             cfg.save(root)?;
         }
         Ok(cfg)
@@ -102,6 +125,11 @@ impl Config {
     pub fn save(&self, root: &Path) -> Result<()> {
         let p = root.join(CONFIG_FILE);
         std::fs::write(&p, serde_json::to_string_pretty(self)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 
@@ -127,10 +155,6 @@ impl Config {
         }
     }
 
-    pub fn view_key_bytes(&self) -> Option<[u8; 32]> {
-        B64.decode(self.view_key.trim()).ok().and_then(|v| v.try_into().ok())
-    }
-
     pub fn domains(&self) -> Vec<String> {
         self.allowed_domain
             .split([',', ' ', '、'])
@@ -140,7 +164,26 @@ impl Config {
     }
 
     pub fn admins(&self) -> Vec<String> {
-        self.admin_emails.iter().map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')).collect()
+        norm_list(&self.admin_emails)
+    }
+
+    pub fn blocked(&self) -> Vec<String> {
+        norm_list(&self.blocked_emails)
+    }
+
+    pub fn origins(&self) -> Vec<String> {
+        let mut o: Vec<String> = self
+            .allowed_origins
+            .iter()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| s.starts_with("http"))
+            .collect();
+        for l in ["http://localhost:8787", "http://127.0.0.1:8787"] {
+            if !o.iter().any(|x| x == l) {
+                o.push(l.into());
+            }
+        }
+        o
     }
 
     /// 相対パスはプロジェクトフォルダー基準で解決する
@@ -157,14 +200,15 @@ impl Config {
         Self::resolve(root, &self.out_dir)
     }
 
+    pub fn store_path(&self, root: &Path) -> PathBuf {
+        Self::resolve(root, &self.store_dir)
+    }
+
     /// 構築を止めるべき問題
     pub fn validate(&self) -> Vec<String> {
         let mut e = vec![];
         if self.photo_dirs.iter().all(|d| d.trim().is_empty()) {
             e.push("写真フォルダーを 1 つ以上設定してください".into());
-        }
-        if self.view_key_bytes().is_none() {
-            e.push("写真の鍵が正しくありません（「鍵を作り直す」を押してください）".into());
         }
         if !(0.0..=1.0).contains(&self.low_weight) {
             e.push("出にくさの重みは 0〜1 の範囲にしてください".into());
@@ -172,14 +216,14 @@ impl Config {
         e
     }
 
-    /// 公開前に埋めておくべき項目（ローカル確認だけなら空でもよい）
+    /// 公開前に埋めておくべき項目（この機械での確認だけなら空でもよい）
     pub fn publish_warnings(&self) -> Vec<String> {
         let mut w = vec![];
         if self.google_client_id.trim().is_empty() {
             w.push("Google の OAuth クライアント ID が未設定です（公開サイトでログインできません）".into());
         }
-        if self.sheet_url.trim().is_empty() {
-            w.push("Apps Script の URL が未設定です（公開サイトでログインできません）".into());
+        if !self.public_api_url.trim().starts_with("https://") {
+            w.push("公開 API の URL（https://…）が未設定です（公開サイトから写真を取れません）".into());
         }
         if self.domains().is_empty() {
             w.push("ログインを許可するドメインが未設定です（管理者以外は入れません）".into());
@@ -187,28 +231,23 @@ impl Config {
         if self.admins().is_empty() {
             w.push("管理者のメールアドレスが未設定です".into());
         }
+        if self.allowed_origins.iter().all(|o| o.trim().is_empty()) {
+            w.push("公開 API を呼んでよいサイト（GitHub Pages のアドレス）が未設定です".into());
+        }
         w
     }
 
-    /// Apps Script のスクリプトプロパティを一括設定する関数（エディタに貼って 1 回実行する）
+    /// Apps Script のスクリプトプロパティを設定する関数（エディタに貼って 1 回実行する）
     pub fn apps_script_setup(&self) -> String {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('\'', "\\'");
         format!(
             "// Apps Script エディタに貼り付けて、関数 setupProperties を 1 回だけ実行してください。\n\
-             // 実行後はこの関数を削除してかまいません（鍵がコードに残らないように）。\n\
+             // 実行後はこの関数を削除してかまいません。\n\
              function setupProperties() {{\n\
-             \x20 PropertiesService.getScriptProperties().setProperties({{\n\
-             \x20   CLIENT_ID: '{}',\n\
-             \x20   ALLOWED_DOMAIN: '{}',\n\
-             \x20   ADMIN_EMAILS: '{}',\n\
-             \x20   VIEW_KEY: '{}',\n\
-             \x20 }});\n\
+             \x20 PropertiesService.getScriptProperties().setProperties({{ SHEET_TOKEN: '{}' }});\n\
              \x20 Logger.log('設定しました');\n\
              }}\n",
-            esc(self.google_client_id.trim()),
-            esc(&self.domains().join(",")),
-            esc(&self.admins().join(",")),
-            esc(self.view_key.trim()),
+            esc(self.sheet_token.trim()),
         )
     }
 }

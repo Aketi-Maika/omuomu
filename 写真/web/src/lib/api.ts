@@ -1,25 +1,16 @@
-// Apps Script（Google ログインの確認・回答の保存・操作ログ）との通信
-// この PC での表示確認（localPreview）中は、回答をこのブラウザ内(localStorage)にだけ保存する
-import { logout, store } from './store'
-import type { AuditRow, PhotoStat, ResponseRecord, Stats, User } from './types'
-
-const LS_MOCK = 'omuomu.mockResponses'
+// NAS の公開 API との通信。すべての通信にログイン状態（署名つきトークン）を付ける
+import { logout, saveSession, store } from './store'
+import type { AuditRow, Manifest, PhotoStat, ResponseRecord, Stats, User } from './types'
 
 export class SessionExpired extends Error {}
 
+/** 管理ツールの中で Google ログインなしに表示を確かめている */
 export function isMock() {
-  return store.localPreview || !store.pub?.sheetUrl
+  return store.localPreview
 }
 
 export function emptyStat(): PhotoStat {
   return { n: 0, people: {}, unknown: 0, left: 0, staff: 0 }
-}
-
-/** Apps Script 側と同じ集計（ローカル確認用） */
-export function aggregate(rows: ResponseRecord[]): Stats {
-  const s: Stats = {}
-  for (const r of rows) addTo((s[r.photoId] ??= emptyStat()), r)
-  return s
 }
 
 export function addTo(st: PhotoStat, r: Pick<ResponseRecord, 'people' | 'unknown' | 'left' | 'staff'>) {
@@ -30,50 +21,60 @@ export function addTo(st: PhotoStat, r: Pick<ResponseRecord, 'people' | 'unknown
   if (r.staff > 0) st.staff += 1
 }
 
-function mockRows(): (ResponseRecord & { email?: string; t?: number })[] {
+export function apiUrl(path: string) {
+  if (!store.apiBase) throw new Error('写真の配信先（NAS）がまだ設定されていません')
+  return `${store.apiBase}${path}`
+}
+
+export async function call(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers)
+  if (store.user?.session) headers.set('Authorization', `Bearer ${store.user.session}`)
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  let res: Response
   try {
-    return JSON.parse(localStorage.getItem(LS_MOCK) ?? '[]')
+    res = await fetch(apiUrl(path), { ...init, headers, credentials: 'omit' })
   } catch {
-    return []
+    throw new Error('写真の配信先（NAS）に接続できません。しばらくしてからお試しください')
   }
-}
-
-/** text/plain で送ると CORS のプリフライトが発生しない */
-async function post<T>(body: Record<string, unknown>): Promise<T> {
-  const url = store.pub?.sheetUrl
-  if (!url) throw new Error('Apps Script の URL が設定されていません')
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(body),
-  })
-  const j = await res.json().catch(() => ({ error: 'failed', message: `応答を読めません (${res.status})` }))
-  if (j.error === 'session') {
+  if (res.status === 401) {
     logout()
-    throw new SessionExpired(j.message ?? 'もう一度ログインしてください')
+    throw new SessionExpired('もう一度ログインしてください')
   }
-  if (j.error) throw new Error(j.message ?? j.error)
-  return j as T
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}))
+    throw new Error(j.error ?? `エラー (${res.status})`)
+  }
+  return res
 }
 
-function authed<T>(action: string, body: Record<string, unknown> = {}) {
-  return post<T>({ action, session: store.user?.session, ...body })
+async function callJson<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await (await call(path, init)).json()) as T
 }
 
-export async function login(idToken: string): Promise<{ user: User; viewKey: string }> {
-  const r = await post<{ session: string; email: string; name: string; role: User['role']; exp: number; viewKey: string }>({
-    action: 'login',
-    idToken,
-    ua: navigator.userAgent,
+export async function login(idToken: string): Promise<User> {
+  const r = await callJson<{ session: string; email: string; name: string; role: User['role']; exp: number }>('/pub/login', {
+    method: 'POST',
+    body: JSON.stringify({ idToken }),
   })
-  return { user: { email: r.email, name: r.name, role: r.role, exp: r.exp, session: r.session }, viewKey: r.viewKey }
+  return { email: r.email, name: r.name, role: r.role, exp: r.exp, session: r.session }
+}
+
+export async function signIn(user: User, localPreview = false) {
+  store.user = user
+  store.localPreview = localPreview
+  await fetchManifest()
+  saveSession()
+}
+
+export async function fetchManifest(): Promise<Manifest> {
+  store.manifest = await callJson<Manifest>('/pub/manifest')
+  return store.manifest
 }
 
 export async function fetchStats(): Promise<Stats> {
   if (!store.manifest) return {}
   try {
-    if (isMock()) store.stats = aggregate(mockRows())
-    else store.stats = (await authed<{ photos: Stats }>('stats')).photos ?? {}
+    store.stats = (await callJson<{ photos: Stats }>('/pub/stats')).photos ?? {}
     store.statsError = ''
   } catch (e) {
     if (e instanceof SessionExpired) throw e
@@ -85,44 +86,26 @@ export async function fetchStats(): Promise<Stats> {
 }
 
 export async function submitResponse(r: ResponseRecord): Promise<void> {
-  if (isMock()) {
-    const rows = mockRows()
-    rows.push({ ...r, email: store.user?.email, t: Date.now() })
-    try {
-      localStorage.setItem(LS_MOCK, JSON.stringify(rows))
-    } catch {
-      /* noop */
-    }
-  } else {
-    await authed('submit', { ...r })
-  }
-  // 画面上の集計にもすぐ反映する
+  await call('/pub/submit', {
+    method: 'POST',
+    body: JSON.stringify({ photoId: r.photoId, people: r.people, unknown: r.unknown, left: r.left, staff: r.staff, sessionId: r.sessionId }),
+  })
   addTo((store.stats[r.photoId] ??= emptyStat()), r)
 }
 
 /** 操作ログ（失敗しても画面の操作は止めない） */
 export function logEvent(event: string, detail: Record<string, unknown> = {}) {
-  if (isMock()) {
-    console.info('[log]', store.user?.email, event, detail)
-    return
-  }
-  authed('log', { event, detail }).catch((e) => console.warn('log failed', e))
+  call('/pub/log', { method: 'POST', body: JSON.stringify({ event, detail }) }).catch((e) => console.warn('log failed', e))
 }
 
 export async function fetchAudit(limit = 300): Promise<AuditRow[]> {
-  if (isMock()) {
-    return mockRows()
-      .map((r) => ({
-        t: r.t ?? 0,
-        email: r.email ?? '',
-        name: '',
-        role: '',
-        action: '回答（この PC）',
-        detail: JSON.stringify({ photo: r.photoTitle, names: r.names.join('、'), unknown: r.unknown, left: r.left, staff: r.staff }),
-      }))
-      .reverse()
-  }
-  return (await authed<{ rows: AuditRow[] }>('audit', { limit })).rows
+  return (await callJson<{ rows: AuditRow[] }>(`/pub/audit?limit=${limit}`)).rows
+}
+
+/** 管理者: 選んだ写真を ZIP で受け取る（NAS 側で記録される） */
+export async function downloadZip(ids: string[], label: string, people: string[]): Promise<Blob> {
+  const res = await call('/pub/zip', { method: 'POST', body: JSON.stringify({ ids, label, people }) })
+  return res.blob()
 }
 
 export function sessionId(): string {
