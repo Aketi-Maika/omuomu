@@ -1,0 +1,12 @@
+[package]
+name = "gallery-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# wasm でもビルドできるよう、乱数(getrandom)を引き込む既定機能は切っておく
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"

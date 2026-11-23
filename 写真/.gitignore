@@ -1,0 +1,16 @@
+# パスワードや NAS のパスを含む設定・元ファイルの場所を含むキャッシュ（絶対に公開しない）
+gallery.config.json
+.gallery-cache.json
+
+# ビルド成果物
+/target/
+web/node_modules/
+web/dist/
+web/src/wasm/pkg/
+
+# 公開してよいのは web/public/data（暗号化済み）だけ。念のため元の画像形式は弾く
+web/public/data/**/*.jpg
+web/public/data/**/*.jpeg
+web/public/data/**/*.JPG
+web/public/data/**/*.png
+dist-nas/
