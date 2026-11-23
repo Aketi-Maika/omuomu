@@ -51,7 +51,8 @@ jobs:
       - run: npm run build
 
       - name: 公開データがあるか確認
-        run: test -f dist/data/public.json || (echo "web/public/data がありません。管理ツールで構築・公開してください" && exit 1)
+        # データが無いときも公開する（入口に「まだ写真が公開されていません」と出る）
+        run: test -f dist/data/public.json || echo "::warning::web/public/data に公開データがありません。管理ツールで構築・公開してください"
 
       - uses: actions/upload-pages-artifact@v3
         with:
