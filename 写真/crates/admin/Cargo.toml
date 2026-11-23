@@ -1,0 +1,28 @@
+[package]
+name = "omuomu-gallery"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "写真展サイトの管理ツール（NAS の写真を暗号化して公開データを作る / ローカル管理画面）"
+
+[[bin]]
+name = "omuomu-gallery"
+path = "src/main.rs"
+
+[dependencies]
+gallery-core = { path = "../core" }
+anyhow = "1"
+axum = "0.7"
+base64 = "0.22"
+blake3 = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "rayon"] }
+open = "5"
+rand = "0.8"
+rayon = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower-http = { version = "0.5", features = ["fs"] }
+walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

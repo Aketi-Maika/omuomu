@@ -1,0 +1,68 @@
+# 写真展サイト（写真/ フォルダー）を GitHub Pages に公開する
+# 管理ツールの「GitHub に公開」で暗号化済みデータが push されると自動で動きます。
+name: photo-exhibition-pages
+
+on:
+  push:
+    branches: [main, '2023']
+    paths:
+      - '写真/**'
+      - '.github/workflows/photo-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 写真/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 写真
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: 写真/web/package-lock.json
+
+      - run: npm ci
+      - run: npm run wasm
+      - run: npm run build
+
+      - name: 公開データがあるか確認
+        run: test -f dist/data/public.json || (echo "web/public/data がありません。管理ツールで構築・公開してください" && exit 1)
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: 写真/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
