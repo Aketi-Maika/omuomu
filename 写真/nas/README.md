@@ -22,8 +22,7 @@ bash nas/package.sh
 scp dist-nas/omuomu-nas.tar.gz root@<NAS の IP>:/root/
 ```
 
-> まだなら先に、`写真` フォルダー一式と `.github/workflows/photo-pages.yml` を GitHub の `2023` ブランチに push しておいてください
-> （NAS はそのブランチを取り込んで使います）。元の写真や `写真登録.xlsx` は push しないこと。
+> NAS は GitHub の `main` ブランチを取り込んで使います。元の写真や `写真登録.xlsx` は push しないこと。
 
 NAS 側で展開します。
 
@@ -62,7 +61,7 @@ bash 02-share.sh          # ユーザー名を変えるなら: bash 02-share.sh 
 ```
 \\NAS\photos\
   ├─ 2023写真\        … 写真（サブフォルダーも読み込みます）
-  └─ 写真登録.xlsx    … 名簿
+  └─ 写真登録.xlsx    … 名簿（Excel で編集。構築のたびに読み込み直します）
 ```
 
 ## 3. 管理ツールを常駐させる（03-gallery.sh）

@@ -1,14 +1,14 @@
 #!/bin/bash
 # 管理ツール omuomu-gallery を NAS に入れて常駐させる（2 回目以降は更新）
 #   使い方: このファイルと同じフォルダー（omuomu-nas を展開した場所）で bash 03-gallery.sh
-#   変更したいときは環境変数で: BRANCH=main REPO=git@github.com:xxx/yyy.git bash 03-gallery.sh
+#   変更したいときは環境変数で: BRANCH=xxx REPO=git@github.com:xxx/yyy.git bash 03-gallery.sh
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "root で実行してください"; exit 1; }
 mountpoint -q /srv/nas || { echo "/srv/nas がマウントされていません。先に 01-storage.sh を実行してください"; exit 1; }
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-BRANCH=${BRANCH:-2023}
+BRANCH=${BRANCH:-main}
 REPO=${REPO:-git@github.com:Aketi-Maika/omuomu.git}
 SVC_USER=omuomu
 SVC_HOME=/var/lib/omuomu

@@ -49,7 +49,8 @@ cargo run --release
 ブラウザで管理画面（`http://127.0.0.1:8787/#/admin`）が開くので「設定」で次を入力して保存します。
 
 - **写真の登録元（NAS）**: `\\NAS名\共有\写真\2023` や `Z:\写真` など。複数指定可、サブフォルダーも読み込みます（JPEG / PNG）
-- **名簿**: `..\写真登録.xlsx`（B 列=名前、C 列=部署。名前の行に貼った写真は「登録済み」として管理室の判定に使います）
+- **名簿**: NAS の `写真登録.xlsx`（例: `/srv/nas/photos/写真登録.xlsx`。B 列=名前、C 列=部署。名前の行に貼った写真は「登録済み」として管理室の判定に使います）。
+  名簿は NAS 上の Excel を直接編集し、「保存して構築」→「GitHub に公開」で反映します。**リポジトリには置かないでください。**
 - **Google ログイン**: OAuth クライアント ID、許可するドメイン、管理者のメールアドレス、Apps Script の URL（下の「Google ログインの準備」）
 - 未設定のままでも、この PC では入口の「この PC で確認」から表示を確かめられます（記録はその端末内だけ）
 
@@ -64,7 +65,6 @@ push されると GitHub Actions（`.github/workflows/photo-pages.yml`）が画�
 
 > 初回だけ、このフォルダーのプログラム一式と `.github/workflows/photo-pages.yml` を commit / push し、
 > GitHub のリポジトリ設定 → Pages → Source を **GitHub Actions** にしてください。
-> `2023` ブランチから公開する場合は Settings → Environments → github-pages の許可ブランチに `2023` を追加します。
 
 ## Google ログインの準備
 
